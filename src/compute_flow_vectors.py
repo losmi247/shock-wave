@@ -1,9 +1,11 @@
 import cv2
 import numpy as np
 import pandas as pd
+import argparse
+import os
 
 
-def compute_flow_vectors(
+def get_flow_vectors(
     video_path, target_frame_numbers, step=20, magnitude_thresh=1.0, length_factor=10
 ):
     cap = cv2.VideoCapture(video_path)
@@ -16,7 +18,6 @@ def compute_flow_vectors(
     target_frame_numbers_set = set(target_frame_numbers)
     results = {}
     frame_number = 1
-
     while True:
         ret, curr_color = cap.read()
         if not ret:
@@ -29,7 +30,7 @@ def compute_flow_vectors(
         )
 
         if frame_number in target_frame_numbers_set:
-            vis = curr_color.copy()
+            flow_trails_image = curr_color.copy()
             h, w = curr_color.shape[:2]
             flow_vectors = []
 
@@ -53,14 +54,14 @@ def compute_flow_vectors(
                         int(x + fxy[0] * length_factor),
                         int(y + fxy[1] * length_factor),
                     )
-                    cv2.line(vis, start, end, color, 1, cv2.LINE_AA)
-                    cv2.circle(vis, start, 1, color, -1)
+                    cv2.line(flow_trails_image, start, end, color, 1, cv2.LINE_AA)
+                    cv2.circle(flow_trails_image, start, 1, color, -1)
 
                     flow_vectors.append([start, end])
 
-            results[frame_number] = (vis, flow_vectors)
+            results[frame_number] = (flow_trails_image, flow_vectors)
             print(
-                f"Extracted vectors for frame {frame_number} ({len(flow_vectors)} vectors)"
+                f"Extracted {len(flow_vectors)} flow vectors for frame {frame_number}."
             )
 
             target_frame_numbers_set.remove(frame_number)
@@ -76,28 +77,49 @@ def compute_flow_vectors(
     return results
 
 
-video_path = "./videos/4.mp4"
-target_frame_numbers = np.arange(420, 500, 1)
+def main():
+    parser = argparse.ArgumentParser(description="Compute optical flow vectors.")
+    parser.add_argument("video_path", help="Path to the video file.")
+    parser.add_argument("start_frame", type=int, help="Start frame number.")
+    parser.add_argument("end_frame", type=int, help="End frame number.")
+    parser.add_argument("output_dir", help="Base directory to save outputs.")
 
-results = compute_flow_vectors(
-    video_path, target_frame_numbers, step=15, magnitude_thresh=0.1, length_factor=20
-)
+    args = parser.parse_args()
 
-for frame_number, (vis_image, vectors) in results.items():
-    cv2.imwrite(
-        "./results/trails/flow_visualization_frame_{}.png".format(frame_number),
-        vis_image,
-    )
-    print(f"Saved image for frame {frame_number}. First 5 vectors: {vectors[:5]}")
+    target_frame_numbers = np.arange(args.start_frame, args.end_frame + 1)
 
-    frame_df = pd.DataFrame(vectors, columns=["start", "end"])
-    frame_df[["start_x", "start_y"]] = pd.DataFrame(
-        frame_df["start"].tolist(), index=frame_df.index
+    results = get_flow_vectors(
+        args.video_path,
+        target_frame_numbers,
+        step=15,
+        magnitude_thresh=0.1,
+        length_factor=20,
     )
-    frame_df[["end_x", "end_y"]] = pd.DataFrame(
-        frame_df["end"].tolist(), index=frame_df.index
-    )
-    frame_df = frame_df.drop(columns=["start", "end"])
-    frame_df.to_csv(
-        "./results/vectors/flow_vectors_frame_{}.csv".format(frame_number), index=False
-    )
+
+    trails_dir = os.path.join(args.output_dir, "trails")
+    vectors_dir = os.path.join(args.output_dir, "vectors")
+    os.makedirs(trails_dir, exist_ok=True)
+    os.makedirs(vectors_dir, exist_ok=True)
+    for frame_number, (flow_trails_image, vectors) in results.items():
+        image_path = os.path.join(
+            trails_dir, f"flow_visualization_frame_{frame_number}.png"
+        )
+        cv2.imwrite(image_path, flow_trails_image)
+        print(f"Saved image for frame {frame_number}.")
+
+        start_points = [v[0] for v in vectors]
+        end_points = [v[1] for v in vectors]
+        frame_df = pd.DataFrame(
+            {
+                "start_x": [x for x, y in start_points],
+                "start_y": [y for x, y in start_points],
+                "end_x": [x for x, y in end_points],
+                "end_y": [y for x, y in end_points],
+            }
+        )
+        csv_path = os.path.join(vectors_dir, f"flow_vectors_frame_{frame_number}.csv")
+        frame_df.to_csv(csv_path, index=False)
+
+
+if __name__ == "__main__":
+    main()

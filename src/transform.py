@@ -1,122 +1,224 @@
 import numpy as np
-import math
-import scipy
+import cv2
 import pandas as pd
-import scipy.spatial
 import matplotlib.pyplot as plt
+import argparse
+import os
 
 
-#
-# Given the 3x3 camera intrinsics matrix K, 3x3 rotation R,
-# and the 3x1 camera location C in world, returns the
-# homography from world coordinate system to image coordinate
-# system for the plane y_world = 0.
-#
-def compute_homography(K, R, C):
-    Rt = np.column_stack((R[:, 0], R[:, 2], -R @ C))
-    return K @ Rt
+def select_roi_points(image, num_points=4):
+    points = []
+
+    def click_event(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN and len(points) < num_points:
+            points.append((x, y))
+            print(f"Point {len(points)}: ({x}, {y})")
+            cv2.circle(image, (x, y), 5, (0, 255, 0), -1)
+            cv2.imshow("Select ROI Points", image)
+
+    print(f"Click {num_points} points in clockwise order.")
+    cv2.imshow("Select ROI Points", image)
+    cv2.setMouseCallback("Select ROI Points", click_event)
+
+    while len(points) < num_points:
+        cv2.waitKey(1)
+
+    cv2.destroyWindow("Select ROI Points")
+    return np.array(points, dtype=np.float32)
 
 
-#
-# Applies the given inverse homography to map the image plane
-# point to the corresponding world plane point.
-#
-def transform_image_to_world(homography_inv, point_image):
-    point_img_h = np.array([point_image[0], point_image[1], 1.0])
-    point_world_h = homography_inv @ point_img_h
-    point_world_h /= point_world_h[2]
-    return point_world_h[:2]
+def transform_point_to_birds_eye_view(homography, point):
+    pt_h = np.array([point[0], point[1], 1.0])
+    pt_transformed = homography @ pt_h
+    pt_transformed /= pt_transformed[2]
+    return pt_transformed[:2]
 
 
-#
-# Maps the given collection of image plane vectors to
-# corresponding world plane vectors in the y=0 plane.
-#
-def map_vectors_to_world(vectors, K, R, C):
-    H = compute_homography(K, R, C)
-    H_inv = np.linalg.inv(H)
-
-    world_vectors = []
+def map_vectors_to_birds_eye_view(homography, vectors):
+    transformed_vectors = []
     for start, end in vectors:
-        start_world = transform_image_to_world(H_inv, start)
-        end_world = transform_image_to_world(H_inv, end)
-        world_vectors.append([start_world, end_world])
+        start_bev = transform_point_to_birds_eye_view(homography, start)
+        end_bev = transform_point_to_birds_eye_view(homography, end)
+        transformed_vectors.append((start_bev, end_bev))
 
-    return world_vectors
-
-
-# Camera and rotation setup
-camera_in_world = [0, 5, 0]
-
-image_width = 480
-image_height = 224
-fov_h = math.pi / 3
-f = image_width / (2 * math.tan(fov_h / 2))
-camera_intrinsics = np.array(
-    [[f, 0, image_width / 2], [0, f, image_height / 2], [0, 0, 1]]
-)
-
-theta_x = 10
-rot_x = scipy.spatial.transform.Rotation.from_euler(
-    "x", -theta_x, True
-).as_matrix()  # negative theta_x as it's a left-hand coordinate system
-theta_y = 45
-rot_y = scipy.spatial.transform.Rotation.from_euler("y", theta_y, True).as_matrix()
-rotations = rot_y @ rot_x
-
-print(
-    f"Homography: {compute_homography(camera_intrinsics, rotations, camera_in_world)}"
-)
+    return transformed_vectors
 
 
-# Process each frame
-frames = np.arange(420, 500, 1)
+def get_transformed_vectors(
+    vectors_dir, frame_number, homography, bev_width, bev_height
+):
+    csv_path = os.path.join(vectors_dir, f"flow_vectors_frame_{frame_number}.csv")
+    df = pd.read_csv(csv_path)
+    vectors = [((x1, y1), (x2, y2)) for x1, y1, x2, y2 in df.values]
 
-for frame_id in frames:
-    df = pd.read_csv(f"./results/vectors/flow_vectors_frame_{frame_id}.csv")
+    bev_vectors = map_vectors_to_birds_eye_view(homography, vectors)
 
-    frame_vectors = df.values
-    vectors = [((x1, y1), (x2, y2)) for x1, y1, x2, y2 in frame_vectors]
+    filtered_vectors = []
+    for start, end in bev_vectors:
+        if (
+            0 <= start[0] < bev_width
+            and 0 <= start[1] < bev_height
+            and 0 <= end[0] < bev_width
+            and 0 <= end[1] < bev_height
+        ):
+            filtered_vectors.append((start, end))
 
-    world_vectors = map_vectors_to_world(
-        vectors, camera_intrinsics, rotations, camera_in_world
+    return filtered_vectors
+
+
+def save_transformed_trails_image(
+    trails_dir, transformed_trails_dir, frame_number, homography, bev_width, bev_height
+):
+    trails_image_path = os.path.join(
+        trails_dir, f"flow_visualization_frame_{frame_number}.png"
     )
-
-    transformed_data = []
-    for start_w, end_w in world_vectors:
-        transformed_data.append(
-            {
-                "x_world_start": start_w[0],
-                "z_world_start": start_w[1],
-                "x_world_end": end_w[0],
-                "z_world_end": end_w[1],
-            }
+    trails_image = cv2.imread(trails_image_path)
+    if trails_image is not None:
+        warped_image = cv2.warpPerspective(
+            trails_image, homography, dsize=(bev_width, bev_height)
         )
 
-    df_world = pd.DataFrame(transformed_data)
-    df_world.to_csv(
-        f"./results/world_vectors/world_flow_vectors_frame_{frame_id}.csv", index=False
-    )
+        transformed_trails_image_path = os.path.join(
+            transformed_trails_dir, f"warped_frame_{frame_number}.png"
+        )
+        cv2.imwrite(transformed_trails_image_path, warped_image)
+    else:
+        print(f"Warning: Could not load trails image for frame {frame_number}")
 
+
+def save_vectors_plot(transformed_vectors_plots_dir, frame_number, vectors):
     plt.figure(figsize=(8, 8))
-    for _, row in df_world.iterrows():
+    for start, end in vectors:
+        vector = [end[0] - start[0], end[1] - start[1]]
+        norm = np.linalg.norm(vector)
+        if norm > 1e-8:
+            vector = vector / norm
+
+        if abs(start[0]) > 1000 or abs(start[1]) > 1000:
+            continue
+
         plt.arrow(
-            row["x_world_start"],
-            row["z_world_start"],
-            row["x_world_end"] - row["x_world_start"],
-            row["z_world_end"] - row["z_world_start"],
-            head_width=0.2,
+            start[0],
+            start[1],
+            vector[0] * 20,
+            vector[1] * 20,
+            head_width=2,
             length_includes_head=True,
         )
-    plt.title(f"World Vectors - Frame {frame_id}")
-    plt.xlabel("X (world)")
-    plt.ylabel("Z (world)")
+
+    plt.title(f"Bird's eye view of flow vectors - frame {frame_number}")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.gca().invert_yaxis()
     plt.grid(True)
     plt.axis("equal")
-    plt.savefig(
-        f"./results/world_vectors_figures/frame_{frame_id}.png",
-        dpi=300,
-        bbox_inches="tight",
+
+    plot_path = os.path.join(transformed_vectors_plots_dir, f"frame_{frame_number}.png")
+    plt.savefig(plot_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Transform flow vectors to bird's eye view."
+    )
+    parser.add_argument(
+        "output_dir", help="Path to the corresponding video file's output directory."
+    )
+    parser.add_argument("start_frame", type=int, help="Start frame number.")
+    parser.add_argument("end_frame", type=int, help="End frame number.")
+    parser.add_argument(
+        "--bev_width", type=int, default=300, help="Width of the bird's eye view image."
+    )
+    parser.add_argument(
+        "--bev_height",
+        type=int,
+        default=400,
+        help="Height of the bird's eye view image.",
     )
 
-    print(f"Finished frame {frame_id}")
+    args = parser.parse_args()
+
+    target_frame_numbers = np.arange(args.start_frame, args.end_frame + 1)
+
+    first_trails_frame = os.path.join(
+        args.output_dir, "trails", f"flow_visualization_frame_{args.start_frame}.png"
+    )
+    image_for_roi = cv2.imread(first_trails_frame)
+    if image_for_roi is None:
+        raise FileNotFoundError(
+            f"Could not load {first_trails_frame} for ROI selection."
+        )
+
+    perspective_points = select_roi_points(image_for_roi)
+    # perspective_points = np.array(
+    #    [[142, 118], [225, 98], [467, 134], [277, 222]], dtype=np.float32
+    # )
+    dest_points = np.array(
+        [
+            [0, 0],
+            [args.bev_width, 0],
+            [args.bev_width, args.bev_height],
+            [0, args.bev_height],
+        ],
+        dtype=np.float32,
+    )
+    homography_matrix = cv2.getPerspectiveTransform(perspective_points, dest_points)
+
+    # Transform each frame's flow vectors to bird's eye view
+    vectors_dir = os.path.join(args.output_dir, "vectors")
+    trails_dir = os.path.join(args.output_dir, "trails")
+    transformed_vectors_dir = os.path.join(args.output_dir, "transformed_vectors")
+    transformed_trails_dir = os.path.join(args.output_dir, "transformed_trails")
+    transformed_vectors_plots_dir = os.path.join(
+        args.output_dir, "transformed_vectors_plots"
+    )
+    os.makedirs(transformed_vectors_dir, exist_ok=True)
+    os.makedirs(transformed_trails_dir, exist_ok=True)
+    os.makedirs(transformed_vectors_plots_dir, exist_ok=True)
+
+    for frame_number in target_frame_numbers:
+        transformed_vectors = get_transformed_vectors(
+            vectors_dir,
+            frame_number,
+            homography_matrix,
+            args.bev_width,
+            args.bev_height,
+        )
+
+        transformed_data = []
+        for start_w, end_w in transformed_vectors:
+            transformed_data.append(
+                {
+                    "start_x": start_w[0],
+                    "start_y": start_w[1],
+                    "end_x": end_w[0],
+                    "end_y": end_w[1],
+                }
+            )
+        transformed_df = pd.DataFrame(
+            transformed_data, columns=["start_x", "start_y", "end_x", "end_y"]
+        )
+        df_path = os.path.join(
+            transformed_vectors_dir,
+            f"transformed_flow_vectors_frame_{frame_number}.csv",
+        )
+        transformed_df.to_csv(df_path, index=False)
+        print(f"Saved transformed vectors for frame {frame_number}")
+
+        save_transformed_trails_image(
+            trails_dir,
+            transformed_trails_dir,
+            frame_number,
+            homography_matrix,
+            args.bev_width,
+            args.bev_height,
+        )
+
+        save_vectors_plot(
+            transformed_vectors_plots_dir, frame_number, transformed_vectors
+        )
+
+
+if __name__ == "__main__":
+    main()
