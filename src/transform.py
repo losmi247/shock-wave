@@ -151,9 +151,6 @@ def main():
         )
 
     perspective_points = select_roi_points(image_for_roi)
-    # perspective_points = np.array(
-    #    [[142, 118], [225, 98], [467, 134], [277, 222]], dtype=np.float32
-    # )
     dest_points = np.array(
         [
             [0, 0],

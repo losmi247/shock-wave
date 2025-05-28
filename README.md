@@ -89,3 +89,27 @@ This is then repeated for each useful frame in the recording, giving the followi
 ## Velocity $u$
 
 *try the magnitude of flow vectors?*
+
+## Instructions
+
+Install the Python packages and run:
+
+```
+python3 ./src/compute_flow_vectors_.py [path_to_video] [start_frame] [end_frame] [output_dir]
+```
+
+to get the optical flow vectors in ```[output_dir]/vectors```. Then transform them to bird's
+eye view:
+
+```
+python3 ./src/transform.py [output_dir] [start_frame] [end_frame] [--bev_width BEV_WIDTH] [--bev_height BEV_HEIGHT]
+```
+
+where ```output_dir``` is the same directory that was provided to ```compute_flow_vectors.py```, and ```bev_width``` and ```bev_height``` are the desired width and height of the
+bird's eye view image. This saves the transformed flow vectors in ```[output_dir]/transformed_vectors```. Finally, use these flow vectors to estimate quantities using:
+
+```
+python3 ./src/angle/cluster_directions.py [output_dir] [start_frame] [end_frame]
+```
+
+where ```[output_dir]``` is the same as in the previous two commands.
